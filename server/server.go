@@ -9,15 +9,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// server on 127.0.0.1:70
-
-const SERVER_PORT = 70 
-
 type TCPPacket struct{ 
 	SrcIp [4]byte
 	DestIP [4]byte
-	SrcPort uint16
-	DestPort uint16
 	SequenceNumber [8]byte
 	Data []byte
 }
@@ -28,8 +22,7 @@ type IFR struct{
 
 func InitPacket() (*TCPPacket){
 	tcp := &TCPPacket{}
-	copy(tcp.SrcIp[:], []byte{0x7F,0x00,0x00,0x01})
-	tcp.SrcPort = SERVER_PORT
+	copy(tcp.SrcIp[:], []byte{0x0A,0x00,0x00,0x01})
 
 	return tcp
 }
@@ -38,10 +31,11 @@ func parseInComingClientsPackets(buffer *[]byte){
 	
 }
 
-func Server(){
+func Server(ready chan<-error){
 	fd, err := unix.Open("/dev/net/tun", syscall.O_RDWR, 0644)
 	if err!=nil{
 		fmt.Printf("[ERR] %s\n", err)
+		ready<-err
 		return
 	}
 	defer unix.Close(fd)
@@ -50,6 +44,7 @@ func Server(){
 	
 	if err!=nil{
 		fmt.Printf("[ERR] %s\n", err)
+		ready<-err
 		return
 	}
 
@@ -62,30 +57,45 @@ func Server(){
 		return
 	}
 
-	ifr.SetInet4Addr([]byte{0x7F,0x00,0x00,0x01})
+	ifr.SetInet4Addr([]byte{0x0A,0x00,0x00,0x10})
 
 	sock, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	
 	if err!=nil{
 		fmt.Printf("[ERR] %s\n", err)
+		ready<-err
 		return
 	}
 
 	unix.IoctlIfreq(sock, unix.SIOCSIFADDR, ifr) 
 
-	// ip, _ := ifr.Inet4Addr()
-	// fmt.Println(ifr.Name(), ip)
+	ip, _ := ifr.Inet4Addr()
+	fmt.Printf("[INFO] Server running on: %d\n", ip[:])
 	
 	unix.IoctlIfreq(sock, unix.SIOCGIFFLAGS, ifr)
 
 	if ifr.Uint16() & unix.IFF_UP == 0 {
-		fmt.Printf("getting %s up\n", ifr.Name())
+		fmt.Printf("[INFO] Getting %s Interface UP\n", ifr.Name())
 		// add up flag for activation
 		ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
 		unix.IoctlIfreq(sock, unix.SIOCSIFFLAGS, ifr)
 	}
 
+	ready <- nil
+	buffer := make([]byte, 65543)
 	for {
+
+		n, err := unix.Read(fd, buffer)
+		if err!=nil{
+			fmt.Printf("[ERR] %s\n", err)
+			ready<-err
+			continue
+		}
+
+		// only checks for ipv4 add more filtering
+		if n >= 20 && buffer[0]>>4 == 4 && buffer[9] == 255 {
+			fmt.Printf("Message: %q\n", string(buffer[20:n]))
+		}
 		
 	}
 	
