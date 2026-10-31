@@ -1,102 +1,90 @@
 // custom tcp/ip stack
-
 package server
 
 import (
 	"fmt"
+	"net"
 	"syscall"
-
 	"golang.org/x/sys/unix"
 )
 
-type TCPPacket struct{ 
-	SrcIp [4]byte
-	DestIP [4]byte
-	SequenceNumber [8]byte
-	Data []byte
-}
-
-type IFR struct{
-
-}
-
-func InitPacket() (*TCPPacket){
-	tcp := &TCPPacket{}
-	copy(tcp.SrcIp[:], []byte{0x0A,0x00,0x00,0x01})
-
-	return tcp
-}
-
-func parseInComingClientsPackets(buffer *[]byte){
-	
-}
-
-func Server(ready chan<-error){
-	fd, err := unix.Open("/dev/net/tun", syscall.O_RDWR, 0644)
-	if err!=nil{
-		fmt.Printf("[ERR] %s\n", err)
-		ready<-err
+func Server() {
+	fd, err := unix.Open("/dev/net/tun", syscall.O_RDWR, 0)
+	if err != nil {
+		fmt.Printf("[ERR] open /dev/net/tun: %s\n", err)
 		return
 	}
 	defer unix.Close(fd)
 
 	ifr, err := unix.NewIfreq("tun0")
-	
-	if err!=nil{
-		fmt.Printf("[ERR] %s\n", err)
-		ready<-err
+	if err != nil {
+		fmt.Printf("[ERR] NewIfreq: %s\n", err)
 		return
 	}
 
 	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
 
-	err = unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr)
-
-	if err!=nil{
-		fmt.Printf("[ERR] %s\n", err)
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
+		fmt.Printf("[ERR] TUNSETIFF: %s\n", err)
 		return
 	}
 
-	ifr.SetInet4Addr([]byte{0x0A,0x00,0x00,0x10})
 
 	sock, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
-	
-	if err!=nil{
-		fmt.Printf("[ERR] %s\n", err)
-		ready<-err
+	if err != nil {
+		fmt.Printf("[ERR] socket: %s\n", err)
+		return
+	}
+	defer unix.Close(sock)
+
+	ifr.SetInet4Addr([]byte{0x0A, 0x00, 0x00, 0x10})
+	if err := unix.IoctlIfreq(sock, unix.SIOCSIFADDR, ifr); err != nil {
+		fmt.Printf("[ERR] SIOCSIFADDR: %s\n", err)
 		return
 	}
 
-	unix.IoctlIfreq(sock, unix.SIOCSIFADDR, ifr) 
+	ip, err := ifr.Inet4Addr()
+	if err != nil {
+		fmt.Printf("[ERR] Inet4Addr: %s\n", err)
+		return
+	}
+	fmt.Printf("[INFO] Server running on: %s\n", net.IP(ip[:]).String())
 
-	ip, _ := ifr.Inet4Addr()
-	fmt.Printf("[INFO] Server running on: %d\n", ip[:])
-	
-	unix.IoctlIfreq(sock, unix.SIOCGIFFLAGS, ifr)
-
-	if ifr.Uint16() & unix.IFF_UP == 0 {
-		fmt.Printf("[INFO] Getting %s Interface UP\n", ifr.Name())
-		// add up flag for activation
-		ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
-		unix.IoctlIfreq(sock, unix.SIOCSIFFLAGS, ifr)
+	if err := unix.IoctlIfreq(sock, unix.SIOCGIFFLAGS, ifr); err != nil {
+		fmt.Printf("[ERR] SIOCGIFFLAGS: %s\n", err)
+		return
 	}
 
-	ready <- nil
-	buffer := make([]byte, 65543)
-	for {
+	if ifr.Uint16()&unix.IFF_UP == 0 {
+		fmt.Printf("[INFO] Bringing %s up\n", ifr.Name())
+		ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
+		if err := unix.IoctlIfreq(sock, unix.SIOCSIFFLAGS, ifr); err != nil {
+			fmt.Printf("[ERR] SIOCSIFFLAGS: %s\n", err)
+			return
+		}
+	}
 
+
+	buffer := make([]byte, 65535)
+	for {
 		n, err := unix.Read(fd, buffer)
-		if err!=nil{
-			fmt.Printf("[ERR] %s\n", err)
-			ready<-err
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			fmt.Printf("[ERR] tun read: %s\n", err)
+			return
+		}
+
+		if n < 20 || buffer[0]>>4 != 4 || buffer[9] != 253 {
 			continue
 		}
 
-		// only checks for ipv4 add more filtering
-		if n >= 20 && buffer[0]>>4 == 4 && buffer[9] == 255 {
-			fmt.Printf("Message: %q\n", string(buffer[20:n]))
+		ihl := int(buffer[0]&0x0f) * 4
+		if ihl < 20 || n <= ihl {
+			continue
 		}
-		
+
+		fmt.Printf("Message: %q\n", string(buffer[ihl:n]))
 	}
-	
 }
